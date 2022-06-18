@@ -71,8 +71,11 @@
 //! for both, `&FieldElement` and `FieldElement`.
 
 use core::cmp::PartialEq;
+use std::ops::{MulAssign, Mul, SubAssign, Neg, Sub, AddAssign, Add};
 
-use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use ff::{PrimeField, Field, PrimeFieldBits, FieldBits};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+
 
 use rand::{CryptoRng, Rng};
 
@@ -117,11 +120,17 @@ impl ConditionallySelectable for FieldElement {
     }
 }
 
-impl Into<Scalar> for &FieldElement {
-    fn into(self) -> Scalar {
-        Scalar::from_bytes_mod_order(self.to_bytes())
+impl From<&FieldElement> for Scalar {
+    fn from(val: &FieldElement) -> Self {
+        Scalar::from_bytes_mod_order(val.to_bytes())
     }
 }
+
+// impl Into<Scalar> for &FieldElement {
+//     fn into(self) -> Scalar {
+//         Scalar::from_bytes_mod_order(self.to_bytes())
+//     }
+// }
 
 impl FieldElement {
     /// Generate a valid FieldElement choosen uniformly using user-
@@ -137,5 +146,235 @@ impl FieldElement {
         // Ensure that the value is lower than `FIELD_L`.
         bytes[31] &= 0b0000_0111;
         FieldElement::from_bytes(&bytes)
+    }
+}
+
+impl PrimeField for FieldElement {
+    type Repr = [u8;32];
+
+    fn from_repr(repr: Self::Repr) -> subtle::CtOption<Self> {
+        CtOption::new(
+            Self::from_bytes(&repr),
+            Choice::from(1u8),
+        )
+    }
+
+    fn to_repr(&self) -> Self::Repr {
+        self.to_bytes()
+    }
+
+    fn is_odd(&self) -> Choice {
+        todo!()
+    }
+
+    const NUM_BITS: u32 = 256;
+
+    const CAPACITY: u32 = 256;
+
+    const S: u32 = 4;
+
+    fn multiplicative_generator() -> Self {
+        todo!()
+    }
+
+    fn root_of_unity() -> Self {
+        todo!()
+    }
+
+    fn from_str_vartime(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+
+        if s == "0" {
+            return Some(Self::zero());
+        }
+
+        let mut res = Self::zero();
+
+        let ten = Self::from(10u32);
+
+        let mut first_digit = true;
+
+        for c in s.chars() {
+            match c.to_digit(10) {
+                Some(c) => {
+                    if first_digit {
+                        if c == 0 {
+                            return None;
+                        }
+
+                        first_digit = false;
+                    }
+
+                    res.mul_assign(&ten);
+                    res.add_assign(&Self::from(u64::from(c)));
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+
+        Some(res)
+    }
+
+    fn from_repr_vartime(repr: Self::Repr) -> Option<Self> {
+        Self::from_repr(repr).into()
+    }
+
+    fn is_even(&self) -> Choice {
+        !self.is_odd()
+    }
+}
+
+impl Field for FieldElement {
+    fn random(rng: impl ff::derive::rand_core::RngCore) -> Self {
+        todo!()
+    }
+
+    fn zero() -> Self {
+        FieldElement::zero()
+    }
+
+    fn one() -> Self {
+        FieldElement::one()
+    }
+
+    fn square(&self) -> Self {
+        self * self
+    }
+
+    fn double(&self) -> Self {
+        self + self
+    }
+
+    fn invert(&self) -> CtOption<Self> {
+        todo!()
+    }
+
+    fn sqrt(&self) -> CtOption<Self> {
+        todo!()
+    }
+}
+
+impl<'b> Add<&'b FieldElement> for FieldElement {
+  type Output = Self;
+
+  #[inline]
+  fn add(self, rhs: &'b FieldElement) -> Self::Output {
+    self + *rhs
+  }
+}
+
+impl<'a> Add<FieldElement> for &'a FieldElement {
+  type Output = FieldElement;
+
+  #[inline]
+  fn add(self, rhs: FieldElement) -> Self::Output {
+    *self + rhs
+  }
+}
+
+impl AddAssign for FieldElement {
+  #[inline]
+  fn add_assign(&mut self, rhs: Self) {
+    *self = *self + rhs;
+  }
+}
+
+impl<'b> AddAssign<&'b FieldElement> for FieldElement {
+  #[inline]
+  fn add_assign(&mut self, rhs: &'b FieldElement) {
+    *self = *self + rhs;
+  }
+}
+
+impl<'b> Sub<&'b FieldElement> for FieldElement {
+  type Output = Self;
+
+  #[inline]
+  fn sub(self, rhs: &'b FieldElement) -> Self::Output {
+    self - *rhs
+  }
+}
+
+impl<'a> Sub<FieldElement> for &'a FieldElement {
+  type Output = FieldElement;
+
+  #[inline]
+  fn sub(self, rhs: FieldElement) -> Self::Output {
+    *self - rhs
+  }
+}
+
+impl SubAssign for FieldElement {
+  #[inline]
+  fn sub_assign(&mut self, rhs: Self) {
+    *self = *self - rhs;
+  }
+}
+
+impl<'b> SubAssign<&'b FieldElement> for FieldElement {
+  #[inline]
+  fn sub_assign(&mut self, rhs: &'b FieldElement) {
+    *self = *self - rhs;
+  }
+}
+
+impl<'b> Mul<&'b FieldElement> for FieldElement {
+  type Output = Self;
+
+  #[inline]
+  fn mul(self, rhs: &'b FieldElement) -> Self::Output {
+    self * *rhs
+  }
+}
+
+impl<'a> Mul<FieldElement> for &'a FieldElement {
+  type Output = FieldElement;
+
+  #[inline]
+  fn mul(self, rhs: FieldElement) -> Self::Output {
+    *self * rhs
+  }
+}
+
+impl MulAssign for FieldElement {
+  #[inline]
+  fn mul_assign(&mut self, rhs: Self) {
+    *self = *self * rhs;
+  }
+}
+
+impl<'b> MulAssign<&'b FieldElement> for FieldElement {
+  #[inline]
+  fn mul_assign(&mut self, rhs: &'b FieldElement) {
+    *self = *self * rhs;
+  }
+}
+
+impl PrimeFieldBits for FieldElement {
+    type ReprBits = [u8; 32];
+
+    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
+        unimplemented!();
+    }
+
+    fn char_le_bits() -> FieldBits<Self::ReprBits> {
+        unimplemented!();
+    }
+}
+
+#[cfg(test)]
+pub mod test_field_element {
+    use super::*;
+
+    #[test]
+    fn test_scalar_mul() {
+        let f = FieldElement::from_str_vartime("340282366920938463463374607431768211455").unwrap();
+        println!("f1*f2: {:?}", (f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f * f).to_bytes());
+        let d = Scalar::from(u128::MAX);
+        println!("d1*d2: {:?}", d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d * d);
     }
 }

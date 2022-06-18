@@ -58,10 +58,16 @@
 //! All `std::core::ops traits -> (Add, Sub, Mul)` are implemented
 //! for both, `&Scalar` and `Scalar`.
 
-use crate::backend;
+use std::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
 
-use subtle::Choice;
-use subtle::ConstantTimeEq;
+use crate::backend;
+use crate::field::FieldElement;
+use crate::traits::ops::Square;
+
+use ff::{Field, FieldBits, PrimeField, PrimeFieldBits};
+
+use subtle::{Choice, CtOption};
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use rand::{CryptoRng, Rng};
 
@@ -106,6 +112,261 @@ impl Scalar {
         // Ensure that the value is lower than `L`.
         bytes[31] &= 0b0000_0001;
         Scalar::from_bytes(&bytes)
+    }
+}
+
+impl<'b> Add<&'b Scalar> for Scalar {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: &'b Scalar) -> Self::Output {
+        self + *rhs
+    }
+}
+
+impl<'a> Add<Scalar> for &'a Scalar {
+    type Output = Scalar;
+
+    #[inline]
+    fn add(self, rhs: Scalar) -> Self::Output {
+        *self + rhs
+    }
+}
+
+impl AddAssign for Scalar {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl<'b> AddAssign<&'b Scalar> for Scalar {
+    #[inline]
+    fn add_assign(&mut self, rhs: &'b Scalar) {
+        *self = *self + rhs;
+    }
+}
+
+impl<'b> Sub<&'b Scalar> for Scalar {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: &'b Scalar) -> Self::Output {
+        self - *rhs
+    }
+}
+
+impl<'a> Sub<Scalar> for &'a Scalar {
+    type Output = Scalar;
+
+    #[inline]
+    fn sub(self, rhs: Scalar) -> Self::Output {
+        *self - rhs
+    }
+}
+
+impl SubAssign for Scalar {
+    #[inline]
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
+
+impl<'b> SubAssign<&'b Scalar> for Scalar {
+    #[inline]
+    fn sub_assign(&mut self, rhs: &'b Scalar) {
+        *self = *self - rhs;
+    }
+}
+
+impl<'b> Mul<&'b Scalar> for Scalar {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, rhs: &'b Scalar) -> Self::Output {
+        self * *rhs
+    }
+}
+
+impl<'a> Mul<Scalar> for &'a Scalar {
+    type Output = Scalar;
+
+    #[inline]
+    fn mul(self, rhs: Scalar) -> Self::Output {
+        *self * rhs
+    }
+}
+
+impl MulAssign for Scalar {
+    #[inline]
+    fn mul_assign(&mut self, rhs: Self) {
+        *self = *self * rhs;
+    }
+}
+
+impl<'b> MulAssign<&'b Scalar> for Scalar {
+    #[inline]
+    fn mul_assign(&mut self, rhs: &'b Scalar) {
+        *self = *self * rhs;
+    }
+}
+
+impl ConditionallySelectable for Scalar {
+    fn conditional_select(_a: &Self, _b: &Self, _choice: Choice) -> Self {
+        unimplemented!()
+    }
+}
+
+impl Field for Scalar {
+    fn random(_rng: impl ff::derive::rand_core::RngCore) -> Self {
+        unimplemented!()
+    }
+
+    fn zero() -> Self {
+        Scalar::zero()
+    }
+
+    fn one() -> Self {
+        Scalar::one()
+    }
+
+    fn is_zero(&self) -> Choice {
+        self.ct_eq(&Self::zero())
+    }
+
+    fn is_zero_vartime(&self) -> bool {
+        self.is_zero().into()
+    }
+
+    fn square(&self) -> Self {
+        Square::square(self)
+    }
+
+    fn cube(&self) -> Self {
+        Square::square(self) * self
+    }
+
+    fn double(&self) -> Self {
+        self + self
+    }
+
+    fn invert(&self) -> subtle::CtOption<Self> {
+        let fr = FieldElement::from_bytes(&self.to_bytes()).inverse();
+        CtOption::new(
+            Scalar::from_bytes_mod_order(&fr.to_bytes()),
+            Choice::from(1u8),
+        )
+    }
+
+    fn sqrt(&self) -> subtle::CtOption<Self> {
+        unimplemented!()
+    }
+
+    fn pow_vartime<S: AsRef<[u64]>>(&self, exp: S) -> Self {
+        let mut res = Self::one();
+        for e in exp.as_ref().iter().rev() {
+            for i in (0..64).rev() {
+                res = Square::square(&res);
+
+                if ((*e >> i) & 1) == 1 {
+                    res.mul_assign(self);
+                }
+            }
+        }
+
+        res
+    }
+}
+
+impl PrimeField for Scalar {
+    type Repr = [u8; 32];
+
+    fn from_str_vartime(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+
+        if s == "0" {
+            return Some(Self::zero());
+        }
+
+        let mut res = Self::zero();
+
+        let ten = Self::from(10u8);
+
+        let mut first_digit = true;
+
+        for c in s.chars() {
+            match c.to_digit(10) {
+                Some(c) => {
+                    if first_digit {
+                        if c == 0 {
+                            return None;
+                        }
+
+                        first_digit = false;
+                    }
+
+                    res.mul_assign(&ten);
+                    res.add_assign(&Self::from(u64::from(c)));
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+
+        Some(res)
+    }
+
+    fn from_repr(bytes: Self::Repr) -> subtle::CtOption<Self> {
+        CtOption::new(Scalar::from_bytes_mod_order(&bytes), Choice::from(1u8))
+    }
+
+    fn from_repr_vartime(repr: Self::Repr) -> Option<Self> {
+        Self::from_repr(repr).into()
+    }
+
+    fn to_repr(&self) -> Self::Repr {
+        Scalar::to_bytes(self)
+    }
+
+    fn is_odd(&self) -> Choice {
+        !self.is_even()
+    }
+
+    fn is_even(&self) -> Choice {
+        if Scalar::is_even(*self) {
+            Choice::from(1u8)
+        } else {
+            Choice::from(0u8)
+        }
+    }
+
+    const NUM_BITS: u32 = 256;
+
+    const CAPACITY: u32 = 256;
+
+    fn multiplicative_generator() -> Self {
+        unimplemented!()
+    }
+
+    const S: u32 = 4;
+
+    fn root_of_unity() -> Self {
+        unimplemented!()
+    }
+}
+
+impl PrimeFieldBits for Scalar {
+    type ReprBits = [u8; 32];
+
+    fn to_le_bits(&self) -> FieldBits<Self::ReprBits> {
+        self.to_bytes().into()
+    }
+
+    fn char_le_bits() -> FieldBits<Self::ReprBits> {
+        unimplemented!();
     }
 }
 

@@ -84,7 +84,7 @@ use std::default::Default;
 use std::fmt::Debug;
 
 use core::ops::{Index, IndexMut};
-use std::ops::{Add, Mul, Neg, Sub};
+use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 // ------------- Common Point fn declarations ------------- //
 
@@ -128,13 +128,27 @@ where
     let mut Q = T::identity();
     for i in (0..249).rev() {
         Q = Q.double();
-        if scalar_bits[i] == 1u8 {Q = &Q + &point;};
+        if scalar_bits[i] == 1u8 {
+            Q = &Q + &point;
+        };
     }
     Q
 }
 
-pub fn binary_naf_mul<'a, 'b, T>(point: &'a T, scalar: &'b Scalar) -> T 
-where 
+pub fn ltr_bin_mul_edwards<'a, 'b>(point: &'a EdwardsPoint, scalar: &'b Scalar) -> EdwardsPoint {
+    let scalar_bits = scalar.into_bits();
+    let mut Q = EdwardsPoint::identity();
+    for i in (0..249).rev() {
+        Q = Q.double();
+        if scalar_bits[i] == 1u8 {
+            Q = &Q + &point;
+        };
+    }
+    Q
+}
+
+pub fn binary_naf_mul<'a, 'b, T>(point: &'a T, scalar: &'b Scalar) -> T
+where
     for <'c> &'c T: Add<Output = T> + Double<Output = T> + Sub<Output = T>,
     T: Identity,
 {
@@ -306,6 +320,11 @@ impl CompressedEdwardsY {
         self.0
     }
 
+    /// Return the `CompressedEdwardsY` as an array of bytes (it's cannonical state).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     /// Attempt to decompress to an `EdwardsPoint`.
     ///
     /// Returns `None` if the input is not the Y-coordinate of a
@@ -421,13 +440,34 @@ impl From<AffinePoint> for EdwardsPoint {
     /// like (x,y). In the new projective form,
     /// each point will have 3 coordinates, like (X,Y,Z),
     /// with the restriction that Z is never zero.
-    ///  
+    ///
     /// The forward mapping is given by (X,Y)→(XZ,YZ,Z),
     /// for any non-zero z (usually chosen to be 1 for convenience).
     ///
     /// After this is done, we move from Projective to Extended by
     /// setting the new coordinate `T = X * Y`.
     fn from(point: AffinePoint) -> EdwardsPoint {
+        EdwardsPoint {
+            X: point.X,
+            Y: point.Y,
+            Z: FieldElement::one(),
+            T: point.X * point.Y,
+        }
+    }
+}
+
+impl<'a> From<&'a AffinePoint> for EdwardsPoint {
+    /// In affine form, each elliptic curve point has 2 coordinates,
+    /// like (x,y). In the new projective form,
+    /// each point will have 3 coordinates, like (X,Y,Z),
+    /// with the restriction that Z is never zero.
+    ///
+    /// The forward mapping is given by (X,Y)→(XZ,YZ,Z),
+    /// for any non-zero z (usually chosen to be 1 for convenience).
+    ///
+    /// After this is done, we move from Projective to Extended by
+    /// setting the new coordinate `T = X * Y`.
+    fn from(point: &'a AffinePoint) -> EdwardsPoint {
         EdwardsPoint {
             X: point.X,
             Y: point.Y,
@@ -459,6 +499,18 @@ impl Neg for EdwardsPoint {
     /// Negates an `EdwardsPoint` giving it as a result
     fn neg(self) -> EdwardsPoint {
         -&self
+    }
+}
+
+impl<'r> Add<&'r EdwardsPoint> for EdwardsPoint {
+    type Output = EdwardsPoint;
+    /// Add two EdwardsPoints and give the resulting `EdwardsPoint`.
+    /// This implementation is specific for curves with `a = -1` as Sonny is.
+    ///
+    /// [Source: 2008 Hisil–Wong–Carter–Dawson],
+    /// (http://eprint.iacr.org/2008/522), Section 3.1.
+    fn add(self, other: &'r EdwardsPoint) -> EdwardsPoint {
+        &self + other
     }
 }
 
@@ -497,6 +549,20 @@ impl Add<EdwardsPoint> for EdwardsPoint {
     /// (http://eprint.iacr.org/2008/522), Section 3.1.
     fn add(self, other: EdwardsPoint) -> EdwardsPoint {
         &self + &other
+    }
+}
+
+impl<'r> Sub<&'r EdwardsPoint> for EdwardsPoint {
+    type Output = EdwardsPoint;
+    /// Substract two EdwardsPoints and give the resulting `EdwardsPoint`
+    /// This implementation is specific for curves with `a = -1` as Sonny is.
+    /// Source: 2008 Hisil–Wong–Carter–Dawson,
+    /// http://eprint.iacr.org/2008/522, Section 3.1.
+    ///
+    /// The only thing we do is negate the second `EdwardsPoint`
+    /// and add it following the same addition algorithm.
+    fn sub(self, other: &'r EdwardsPoint) -> EdwardsPoint {
+        &self - other
     }
 }
 
@@ -544,6 +610,22 @@ impl Sub<EdwardsPoint> for EdwardsPoint {
     }
 }
 
+impl<'r> Mul<&'r Scalar> for EdwardsPoint {
+    type Output = EdwardsPoint;
+    /// Scalar multiplication: compute `self * Scalar`.
+    /// This implementation uses the algorithm:
+    /// `add_and_doubling` which is the standard one for
+    /// this operations and also adds less constraints on
+    /// R1CS.
+    ///
+    /// Hankerson, Darrel; Vanstone, Scott; Menezes, Alfred (2004).
+    /// Guide to Elliptic Curve Cryptography.
+    /// Springer Professional Computing. New York: Springer-Verlag.
+    fn mul(self, scalar: &'r Scalar) -> EdwardsPoint {
+        double_and_add(&self, scalar)
+    }
+}
+
 impl<'a, 'b> Mul<&'b Scalar> for &'a EdwardsPoint {
     type Output = EdwardsPoint;
     /// Scalar multiplication: compute `self * Scalar`.
@@ -557,6 +639,18 @@ impl<'a, 'b> Mul<&'b Scalar> for &'a EdwardsPoint {
     /// Springer Professional Computing. New York: Springer-Verlag.
     fn mul(self, scalar: &'b Scalar) -> EdwardsPoint {
         double_and_add(self, scalar)
+    }
+}
+
+impl MulAssign<Scalar> for EdwardsPoint {
+    fn mul_assign(&mut self, rhs: Scalar) {
+        *self = *self * rhs;
+    }
+}
+
+impl<'r> MulAssign<&'r Scalar> for EdwardsPoint {
+    fn mul_assign(&mut self, rhs: &'r Scalar) {
+        *self = *self * *rhs;
     }
 }
 
@@ -588,6 +682,34 @@ impl<'a> Double for &'a EdwardsPoint {
     /// Cost: 4M+ 4S+ 1D
     fn double(self) -> EdwardsPoint {
         self + self
+    }
+}
+
+impl AddAssign for EdwardsPoint {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl<'b> AddAssign<&'b EdwardsPoint> for EdwardsPoint {
+    #[inline]
+    fn add_assign(&mut self, rhs: &'b EdwardsPoint) {
+        *self = *self + *rhs;
+    }
+}
+
+impl SubAssign for EdwardsPoint {
+    #[inline]
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}
+
+impl<'b> SubAssign<&'b EdwardsPoint> for EdwardsPoint {
+    #[inline]
+    fn sub_assign(&mut self, rhs: &'b EdwardsPoint) {
+        *self = *self - *rhs;
     }
 }
 
@@ -665,7 +787,7 @@ impl EdwardsPoint {
 
 /// A `ProjectivePoint` represents a point on the Sonny Curve expressed
 /// over the Twisted Edwards Projective Coordinates eg. (X:Y:Z).
-///  
+///
 /// For Z1≠0 the point (X1:Y1:Z1) represents the affine point (x1= X1/Z1, y1= Y1/Z1)
 /// on EE,a,d.
 /// Projective coordinates represent `x` `y` as `(X, Y, Z`) satisfying the following equations:
@@ -772,7 +894,7 @@ impl From<AffinePoint> for ProjectivePoint {
     /// like (x,y). In the new projective form,
     /// each point will have 3 coordinates, like (X,Y,Z),
     /// with the restriction that Z is never zero.
-    ///  
+    ///
     /// The forward mapping is given by (x,y)→(xz,yz,z),
     /// for any non-zero z (usually chosen to be 1 for convenience).
     fn from(point: AffinePoint) -> ProjectivePoint {
@@ -1073,7 +1195,7 @@ impl From<EdwardsPoint> for AffinePoint {
     /// performed in 3M+ 1I by computing:
     ///
     /// First, move to Projective Coordinates by removing `T`.
-    ///  
+    ///
     /// Then, reduce the point from Projective to Affine
     /// coordinates computing: (X*Zinv, Y*Zinv, Z*Zinv).
     ///
@@ -1129,6 +1251,77 @@ impl Neg for AffinePoint {
     /// gives as a result: `(-X, Y)`.
     fn neg(self) -> AffinePoint {
         -&self
+    }
+}
+
+// https://eprint.iacr.org/2008/522.pdf
+// Section 2
+// impl<'a, 'b> Add<&'b AffinePoint> for &'a AffinePoint {
+//     type Output = AffinePoint;
+//     fn add(self, other: &'b AffinePoint) -> AffinePoint {
+//         let lambda = (self.Y - other.Y) / (self.X - other.X);
+//         let x = (lambda * lambda) - self.X - other.X;
+//         AffinePoint {
+//             X: x,
+//             Y: (lambda * (self.X - x)) - self.Y,
+//         }
+//     }
+// }
+
+// impl<'a> Double for &'a AffinePoint {
+//     type Output = AffinePoint;
+//     fn double(self) -> AffinePoint {
+//         let one = FieldElement::one();
+//         let lambda = ((one + one + one) * (self.X * self.X)) / ((one+one) * self.Y);
+//         let x = (lambda * lambda) - self.X - self.X;
+//         AffinePoint {
+//             X: x,
+//             Y: (lambda * (self.X - x)) - self.Y,
+//         }
+//     }
+// }
+
+// https://github.com/ConsenSys/gnark-crypto/blob/1572c4e3cda6663b8d00ae05291e4b1d4f585cd8/ecc/bls12-381/twistededwards/point.go#L199:~:text=//%20modifies%20p-,func%20(p%20*PointAffine,-)%20Add(
+impl<'a, 'b> Add<&'b AffinePoint> for &'a AffinePoint {
+    type Output = AffinePoint;
+    fn add(self, other: &'b AffinePoint) -> AffinePoint {
+        let xv = self.X * other.Y;
+        let yu = self.Y * other.X;
+        let pResX = xv + yu;
+
+        let xu = self.X * other.X;
+        let yv = self.Y * other.Y;
+        let pResY = yv + xu;
+
+        let dxyuv = xv * yu * constants::EDWARDS_D;
+        let one = FieldElement::one();
+        let denx = one + dxyuv;
+        let deny = one - dxyuv;
+
+        AffinePoint {
+            X: pResX / denx,
+            Y: pResY / deny,
+        }
+    }
+}
+
+// https://github.com/ConsenSys/gnark-crypto/blob/1572c4e3cda6663b8d00ae05291e4b1d4f585cd8/ecc/bls12-381/twistededwards/point.go#L199:~:text=*PointAffine)-,Double,-(p1%20*
+impl<'a> Double for &'a AffinePoint {
+    type Output = AffinePoint;
+    fn double(self) -> AffinePoint {
+        let xx = self.X * self.X;
+        let yy = self.Y * self.Y;
+        let xy = self.X * self.Y;
+        let denumx = yy - xx;
+
+        let one = FieldElement::one();
+        let two = one + one;
+        let denumy = -denumx + two;
+
+        AffinePoint {
+            X: (xy + xy) / denumx,
+            Y: (xx + yy) / denumy,
+        }
     }
 }
 
@@ -1402,7 +1595,7 @@ pub mod tests {
         let res = P1_EXTENDED.double();
         assert!(res == P3_EXTENDED);
 
-        // Identity case. 
+        // Identity case.
         let res = EdwardsPoint::identity();
         assert!(res == res.double());
     }
@@ -1616,13 +1809,92 @@ pub mod tests {
         assert!(P1_EXTENDED * Scalar::minus_one() == binary_naf_mul(&P1_EXTENDED, &Scalar::minus_one()));
     }
 
+    // https://www.nayuki.io/page/elliptic-curve-point-addition-in-projective-coordinates
+    #[test]
+    fn double_and_add_edwards_affine() {
+        let edwards = EdwardsPoint::new_random_point(&mut OsRng);
+        let scalar = Scalar::one(); // Scalar::random(&mut OsRng);
+
+        let edwardsop = ltr_bin_mul(&edwards, &scalar);
+        println!("{:?}", AffinePoint::from(edwardsop));
+
+        let affine = AffinePoint::from(edwards);
+        let affineop = ltr_bin_mul(&affine, &scalar);
+        println!("{:?}", affineop);
+    }
+
+    #[test]
+    fn double_and_add_edwards_projective() {
+        let edwards = EdwardsPoint::new_random_point(&mut OsRng);
+        let scalar = Scalar::one() + Scalar::one(); // Scalar::random(&mut OsRng);
+
+        let edwardsop = ltr_bin_mul(&edwards, &scalar);
+        //println!("{:?}", ProjectivePoint::from(edwardsop));
+        println!("{:?}", edwardsop);
+
+        let proj = ProjectivePoint::from(edwards);
+
+        let projop = ltr_bin_mul(&proj, &scalar);
+        //println!("{:?}", projop);
+        println!("{:?}", EdwardsPoint::from(projop));
+    }
+
+    #[test]
+    fn double_and_add_projective_affine() {
+        let projective = ProjectivePoint::new_random_point(&mut OsRng);
+        let scalar = Scalar::one(); // Scalar::random(&mut OsRng);
+
+        let projectiveop = ltr_bin_mul(&projective, &scalar);
+        println!("{:?}", projectiveop);
+
+        let affine = AffinePoint::from(projectiveop);
+        let affineop = ltr_bin_mul(&affine, &scalar);
+        println!("{:?}", affineop);
+    }
+
+    #[test]
+    fn add_edwards_affine_identity() {
+        let edwards = EdwardsPoint::new_random_point(&mut OsRng);
+
+        let edwardsop = edwards + EdwardsPoint::identity();
+        println!("{:?}", AffinePoint::from(edwardsop));
+
+        let affine = AffinePoint::from(edwards);
+        let affineop = &affine + &AffinePoint::identity();
+        println!("{:?}", affineop);
+    }
+
+    #[test]
+    fn add_edwards_affine_2() {
+        let edwards = EdwardsPoint::new_random_point(&mut OsRng);
+
+        let edwardsop = edwards + edwards;
+        println!("{:?}", AffinePoint::from(edwardsop));
+
+        let affine = AffinePoint::from(edwards);
+        let affineop = &affine + &affine;
+        println!("{:?}", affineop);
+    }
+
+        #[test]
+    fn add_edwards_affine_double() {
+        let edwards = EdwardsPoint::new_random_point(&mut OsRng);
+
+        let edwardsop = edwards.double();
+        println!("{:?}", AffinePoint::from(edwardsop));
+
+        let affine = AffinePoint::from(edwards);
+        let affineop = affine.double();
+        println!("{:?}", affineop);
+    }
+
 /*
     #[test]
     fn aaaaa() {
-        // Doubling test. 
+        // Doubling test.
         let scalar = Scalar::from(2u8);
         assert!(double_and_add(&constants::RISTRETTO_BASEPOINT, &scalar) == window_naf_mul(&scalar, 2u8));
-        // Pow of 2. 
+        // Pow of 2.
         let scalar = Scalar::two_pow_k(215);
         assert!(double_and_add(&constants::RISTRETTO_BASEPOINT, &scalar) == window_naf_mul(&scalar, 3u8));
         // Not pow of 2.

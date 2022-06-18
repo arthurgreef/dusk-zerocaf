@@ -17,6 +17,15 @@ pub(crate) const POS_RANGE: FieldElement =
 /// implemented on Scalar Arithmetics module.
 pub const LFACTOR: u64 = 1331240223835829;
 
+/// Montgomery modulus defined for Scalar arithmetics, `R = (2^260) % L`
+pub const R: Scalar = Scalar([
+  2401077695393891,
+  1055772547210409,
+  4503598164913243,
+  4503599627370495,
+  2199023255551,
+]);
+
 /// Montgomery modulus defined for Scalar arithmetics, `R^2 = (2^260)^2 % L`
 pub const RR: Scalar = Scalar([
     137682194168839,
@@ -44,13 +53,13 @@ pub const RR_FIELD: FieldElement = FieldElement([
     10175238647962,
 ]);
 
-/// `SCALAR_INVERSE_MOD_TWO = 1/2 (mod l)`. 
+/// `SCALAR_INVERSE_MOD_TWO = 1/2 (mod l)`.
 pub const SCALAR_INVERSE_MOD_TWO: Scalar = Scalar([2816638389838898, 2933572162591573, 357219, 0, 1099511627776]);
 
-/// `INVERSE_MOD_TWO = 1/2 (mod l)`.                   
+/// `INVERSE_MOD_TWO = 1/2 (mod l)`.
 pub const INVERSE_MOD_TWO: FieldElement = FieldElement([2587757230352887, 4210131976237760, 683900, 0, 8796093022208]);
 
-/// `MINUS_ONE_HALF = (-1/2) (mod l)`. 
+/// `MINUS_ONE_HALF = (-1/2) (mod l)`.
 pub const MINUS_ONE_HALF: FieldElement = FieldElement([2587757230352886, 4210131976237760, 683900, 0, 8796093022208]);
 
 /// FieldElement-LFACTOR is the value that satisfies the equation: `L * LFACTOR = -1 (mod 2^52)`

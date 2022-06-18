@@ -10,20 +10,25 @@ use core::fmt::Debug;
 use core::ops::{Add, Mul, Neg, Sub};
 use core::ops::{Index, IndexMut};
 
+use curve25519_dalek::digest::consts::U64;
+use sha2::Digest;
+
 use std::cmp::{Ord, Ordering, PartialOrd};
 use std::ops::Shr;
 
 use num::Integer;
 
 use crate::backend::u64::constants;
+use crate::field::FieldElement;
 use crate::traits::ops::*;
 use crate::traits::Identity;
 
+use super::constants::{R, RR};
 
 /// The `Scalar` struct represents an Scalar over the modulo
 /// `2^249 + 14490550575682688738086195780655237219` as 5 52-bit limbs
 /// represented in radix `2^52`.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct Scalar(pub [u64; 5]);
 
 impl Debug for Scalar {
@@ -66,18 +71,18 @@ impl Ord for Scalar {
 
 //-------------- From Implementations -----------------//
 impl From<i8> for Scalar {
-    /// Performs the conversion. 
+    /// Performs the conversion.
     fn from(_inp: i8) -> Scalar {
         let mut res = Scalar::zero();
 
         match _inp >= 0 {
             true => {
                 res[0] = _inp as u64;
-                return res
-            },
+                return res;
+            }
             false => {
                 res[0] = _inp.abs() as u64;
-                return -res
+                return -res;
             }
         }
     }
@@ -136,12 +141,18 @@ impl From<u128> for Scalar {
     }
 }
 
+impl From<&FieldElement> for Scalar {
+    fn from(_inp: &FieldElement) -> Scalar {
+        Scalar::from_bytes_mod_order(&_inp.to_bytes())
+    }
+}
+
 impl<'a> Neg for &'a Scalar {
     type Output = Scalar;
     /// Performs the negate operation over the
     /// sub-group modulo l.
     fn neg(self) -> Scalar {
-        &Scalar::zero() - &self
+        Scalar::zero() - self
     }
 }
 
@@ -172,7 +183,7 @@ impl Shr<u8> for Scalar {
             let mut carry = 0u64;
             for i in (0..5).rev() {
                 res[i] = res[i] | carry;
-                
+
                 carry = (res[i] & 1) << 52;
                 res[i] >>= 1;
             }
@@ -359,9 +370,9 @@ impl Scalar {
             for i in 0..8 {
                 let bit = byte >> i as u8;
                 res[j] = !bit.is_even() as u8;
-                j+=1;
-            };
-        };
+                j += 1;
+            }
+        }
         res
     }
 
@@ -383,14 +394,14 @@ impl Scalar {
             };
 
             k = k.half_without_mod();
-            i +=1;
+            i += 1;
         }
         res
     }
 
     #[allow(non_snake_case)]
     /// Compute the Windowed-Non-Adjacent Form of a given `Scalar`.
-    /// 
+    ///
     /// ## Inputs
     /// - `width` => Represents the window-width i.e. `width = 2^width`.
     pub fn compute_window_NAF(&self, width: u8) -> [i8; 256] {
@@ -409,30 +420,30 @@ impl Scalar {
             };
 
             k = k.half_without_mod();
-            i+=1;
+            i += 1;
         }
         res
     }
 
     /// Compute the result from `Scalar (mod 2^k)`.
-    /// 
+    ///
     /// # Panics
-    /// 
-    /// If the given k is > 32 (5 bits) as the value gets 
-    /// greater than the limb.  
+    ///
+    /// If the given k is > 32 (5 bits) as the value gets
+    /// greater than the limb.
     pub fn mod_2_pow_k(&self, k: u8) -> u8 {
-        (self.0[0] & ((1 << k) -1)) as u8
+        (self.0[0] & ((1 << k) - 1)) as u8
     }
 
     /// Compute the result from `Scalar (mods k)`.
-    /// 
+    ///
     /// # Panics
-    /// 
-    /// If the given `k > 32 (5 bits)` || `k == 0` as the value gets 
-    /// greater than the limb.   
+    ///
+    /// If the given `k > 32 (5 bits)` || `k == 0` as the value gets
+    /// greater than the limb.
     pub fn mods_2_pow_k(&self, w: u8) -> i8 {
         assert!(w < 32u8);
-        let modulus = self.mod_2_pow_k(w) as i8; 
+        let modulus = self.mod_2_pow_k(w) as i8;
         let two_pow_w_minus_one = 1i8 << (w - 1);
 
         match modulus >= two_pow_w_minus_one {
@@ -466,11 +477,63 @@ impl Scalar {
         s
     }
 
+    /// Unpack a 32 byte / 256 bit Scalar into 5 52-bit limbs.
+    pub fn from_bytes_mod_order(bytes: &[u8; 32]) -> Scalar {
+        let mut words = [0u64; 4];
+        for i in 0..4 {
+            for j in 0..8 {
+                words[i] |= (bytes[(i * 8) + j] as u64) << (j * 8);
+            }
+        }
+
+        let mask = (1u64 << 52) - 1;
+        let top_mask = (1u64 << 48) - 1;
+        let mut s = Scalar::zero();
+
+        s[0] = words[0] & mask;
+        // Get the 64-52 = 12 bits and add words[1] (shifting 12 to the left) on the front with `|` then apply mask.
+        s[1] = ((words[0] >> 52) | (words[1] << 12)) & mask;
+        s[2] = ((words[1] >> 40) | (words[2] << 24)) & mask;
+        s[3] = ((words[2] >> 28) | (words[3] << 36)) & mask;
+        // Shift 16 to the right to get the 52 bits of the scalar on that limb. Then apply top_mask.
+        s[4] = (words[3] >> 16) & top_mask;
+
+        s = Self::montgomery_mul(&s, &R);
+
+        assert!(s <= Scalar::minus_one());
+        s
+    }
+
     /// Reduce a 64 byte / 512 bit scalar mod l
-    pub fn from_bytes_wide(_bytes: &[u8; 64]) -> Scalar {
+    pub fn from_bytes_wide(bytes: &[u8; 64]) -> Scalar {
         // We could provide 512 bit scalar support using Montgomery Reduction.
         // But first we need to finnish the 256-bit implementation.
-        unimplemented!()
+        let mut words = [0u64; 8];
+        for i in 0..8 {
+            for j in 0..8 {
+                words[i] |= (bytes[(i * 8) + j] as u64) << (j * 8);
+            }
+        }
+
+        let mask = (1u64 << 52) - 1;
+        let mut lo = Scalar::zero();
+        let mut hi = Scalar::zero();
+
+        lo[0] = words[0] & mask;
+        lo[1] = ((words[0] >> 52) | (words[1] << 12)) & mask;
+        lo[2] = ((words[1] >> 40) | (words[2] << 24)) & mask;
+        lo[3] = ((words[2] >> 28) | (words[3] << 36)) & mask;
+        lo[4] = ((words[3] >> 16) | (words[4] << 48)) & mask;
+        hi[0] = (words[4] >> 4) & mask;
+        hi[1] = ((words[4] >> 56) | (words[5] << 8)) & mask;
+        hi[2] = ((words[5] >> 44) | (words[6] << 20)) & mask;
+        hi[3] = ((words[6] >> 32) | (words[7] << 32)) & mask;
+        hi[4] = words[7] >> 20;
+
+        lo = Self::montgomery_mul(&lo, &R);
+        hi = Self::montgomery_mul(&hi, &RR);
+
+        hi + lo
     }
 
     /// Pack the limbs of this `Scalar` into 32 bytes
@@ -528,7 +591,10 @@ impl Scalar {
         // `2^249 - 15145038707218910765482344729778085401` so we pick
         // 250 knowing that 249 will be lower than the prime of the
         // sub group.
-        assert!(exp < 250u64, "Exponent can't be greater than the sub-group order");
+        assert!(
+            exp < 250u64,
+            "Exponent can't be greater than the sub-group order"
+        );
 
         let mut res = Scalar::zero();
         match exp {
@@ -552,12 +618,12 @@ impl Scalar {
     }
 
     /// Returns the half of an **EVEN** `Scalar`.
-    /// 
+    ///
     /// This function performs almost 4x faster than the
     /// `Half` implementation but SHOULD be used carefully.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// When the `Scalar` provided is not even.
     pub fn half_without_mod(self) -> Scalar {
         //assert!(self.is_even());
@@ -566,7 +632,7 @@ impl Scalar {
 
         for i in (0..5).rev() {
             res[i] = res[i] | carry;
-            
+
             carry = (res[i] & 1) << 52;
             res[i] >>= 1;
         }
@@ -615,12 +681,10 @@ impl Scalar {
 
     /// Compute `limbs/R` (mod l), where R is the Montgomery modulus 2^260
     pub(self) fn montgomery_reduce(limbs: &[u128; 9]) -> Scalar {
-
         fn adjustment_fact(sum: u128) -> (u128, u64) {
             let p = (sum as u64).wrapping_mul(constants::LFACTOR) & ((1u64 << 52) - 1);
             ((sum + m(p, constants::L[0])) >> 52, p)
         }
-
 
         fn montg_red_res(sum: u128) -> (u128, u64) {
             let w = (sum as u64) & ((1u64 << 52) - 1);
@@ -671,6 +735,24 @@ impl Scalar {
             limbs[i] = self[i] as u128;
         }
         Scalar::montgomery_reduce(&limbs)
+    }
+
+    pub fn from_hash<D>(hash: D) -> Scalar
+    where
+        D: Digest<OutputSize = U64>,
+    {
+        let mut output = [0u8; 64];
+        output.copy_from_slice(hash.finalize().as_slice());
+        Self::from_bytes_wide(&output)
+    }
+
+    pub fn hash_from_bytes<D>(input: &[u8]) -> Scalar
+    where
+        D: Digest<OutputSize = U64> + Default,
+    {
+        let mut hash = D::default();
+        hash.update(input);
+        Self::from_hash(hash)
     }
 }
 
@@ -947,14 +1029,13 @@ mod tests {
         assert!(A.ct_eq(&B).unwrap_u8() == 0u8);
     }
 
-
     #[test]
     fn two_pow_k() {
-        // 0 case.  
+        // 0 case.
         assert!(Scalar::two_pow_k(0) == Scalar::one());
-        // 1 case. 
+        // 1 case.
         assert!(Scalar::two_pow_k(1) == Scalar::from(2u8));
-        // Normal case. 
+        // Normal case.
         assert!(Scalar::two_pow_k(249) == Scalar([0, 0, 0, 0, 2199023255552]));
         assert!(Scalar::two_pow_k(248) == Scalar([0, 0, 0, 0, 1099511627776]));
     }
@@ -962,23 +1043,23 @@ mod tests {
     #[test]
     fn shr() {
         // Normal case.
-        assert!(A >>1 == Scalar([0, 0, 0, 1, 0]));
+        assert!(A >> 1 == Scalar([0, 0, 0, 1, 0]));
         // Limb reduction case.
-        assert!(Scalar([0, 0, 0, 1, 0]) >>1 == Scalar([0, 0, 2251799813685248, 0, 0]));
-        // Last limb with 1 case. 
-        assert!(Scalar::one() >>1 == Scalar([0, 0, 0, 0, 0]));
-        // Zero case. 
-        assert!(Scalar::zero() >>1 == Scalar::zero());
-        // Max case. 
-        assert!(Scalar::minus_one() >>250 == Scalar::zero());
-        assert!(Scalar::two_pow_k(249)>>248 == Scalar::from(2u8));
+        assert!(Scalar([0, 0, 0, 1, 0]) >> 1 == Scalar([0, 0, 2251799813685248, 0, 0]));
+        // Last limb with 1 case.
+        assert!(Scalar::one() >> 1 == Scalar([0, 0, 0, 0, 0]));
+        // Zero case.
+        assert!(Scalar::zero() >> 1 == Scalar::zero());
+        // Max case.
+        assert!(Scalar::minus_one() >> 250 == Scalar::zero());
+        assert!(Scalar::two_pow_k(249) >> 248 == Scalar::from(2u8));
         // Reduction
-        assert!(Scalar::two_pow_k(249)>>249 == Scalar::one());
+        assert!(Scalar::two_pow_k(249) >> 249 == Scalar::one());
     }
 
     #[test]
     fn into_bits() {
-        // Define following results as bit-arrays. 
+        // Define following results as bit-arrays.
         let zero = [0u8; 256];
         let one = {
             let mut res = zero.clone();
@@ -995,17 +1076,27 @@ mod tests {
             res[249] = 1;
             res
         };
-        let minus_one = [0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        let minus_one = [
+            0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+            1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1,
+            0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0,
+            0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0,
+            0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        ];
 
-        // 0 case. 
+        // 0 case.
         assert!(&Scalar::zero().into_bits()[..] == &zero[..]);
-        // 1 case. 
+        // 1 case.
         assert!(&Scalar::one().into_bits()[..] == &one[..]);
-        // Odd case. 
-        assert!(&Scalar::from(9u8).into_bits()[..] == &nine[..]); 
-        // Even case. 
+        // Odd case.
+        assert!(&Scalar::from(9u8).into_bits()[..] == &nine[..]);
+        // Even case.
         assert!(&Scalar::two_pow_k(249).into_bits()[..] == &two_pow_249[..]);
-        // MAX case. 
+        // MAX case.
         assert!(&Scalar::minus_one().into_bits()[..] == &minus_one[..]);
     }
 
@@ -1015,14 +1106,24 @@ mod tests {
         assert!(Scalar::from(4u8).mod_2_pow_k(2u8) == 0u8);
         // Low case.
         assert!(Scalar::from(3u8).mod_2_pow_k(2u8) == 3u8);
-        // Bignum case. 
+        // Bignum case.
         assert!(Scalar::from(557u16).mod_2_pow_k(2u8) == 1u8);
         assert!(Scalar::from(42535295865117307932887201356513780707u128).mod_2_pow_k(2u8) == 3u8);
     }
 
     #[test]
     fn naf() {
-        let seven_in_naf = [-1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let seven_in_naf = [
+            -1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         assert!(&Scalar::from(7u8).compute_NAF()[..4] == &seven_in_naf[..4]);
     }
 
@@ -1030,24 +1131,38 @@ mod tests {
     fn window_naf() {
         let scalar = Scalar::from(1122334455u64);
         // Case NAF2
-        let naf2_scalar = [-1, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, -1, 0, 1, 0, -1, 0, 0 ,-1, 0,1,0,0,0,1];
+        let naf2_scalar = [
+            -1, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0, -1, 0, 1, 0, -1, 0, 0, -1, 0,
+            1, 0, 0, 0, 1,
+        ];
         assert!(&naf2_scalar[..] == &scalar.compute_window_NAF(2)[..31]);
 
         // Case NAF3
-        let naf3_scalar = [-1, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, 0, 3,0,0,1,0,0,-1,0,0,3,0,0,0,0,0,1];
+        let naf3_scalar = [
+            -1, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, 0, 3, 0, 0, 1, 0, 0, -1, 0, 0, 3, 0, 0,
+            0, 0, 0, 1,
+        ];
         assert!(&naf3_scalar[..] == &scalar.compute_window_NAF(3)[..31]);
 
         // Case NAF4
-        let naf4_scalar = [7,0,0,0,-1,0,0,0,7,0,0,0,7,0,0,0,5,0,0,0,0,7,0,0,0,1,0,0,0,0,1];
+        let naf4_scalar = [
+            7, 0, 0, 0, -1, 0, 0, 0, 7, 0, 0, 0, 7, 0, 0, 0, 5, 0, 0, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0,
+            0, 1,
+        ];
         assert!(&naf4_scalar[..] == &scalar.compute_window_NAF(4)[..31]);
 
         // Case NAF5
-        let naf5_scalar = [-9,0,0,0,0,0,0,0,-9,0,0,0,0,0,0,11,0,0,0,0,0,-9,0,0,0,0,-15,0,0,0,0,1];
+        let naf5_scalar = [
+            -9, 0, 0, 0, 0, 0, 0, 0, -9, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, -9, 0, 0, 0, 0, -15,
+            0, 0, 0, 0, 1,
+        ];
         assert!(&naf5_scalar[..] == &scalar.compute_window_NAF(5)[..32]);
 
         //Case NAF6
-        let naf6_scalar = [-9,0,0,0,0,0,0,0,-9,0,0,0,0,0,0,11,0,0,0,0,0,23,0,0,0,0,0,0,0,0,1];
+        let naf6_scalar = [
+            -9, 0, 0, 0, 0, 0, 0, 0, -9, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0, 0, 23, 0, 0, 0, 0, 0, 0,
+            0, 0, 1,
+        ];
         assert!(&naf6_scalar[..] == &scalar.compute_window_NAF(6)[..31]);
-
     }
 }
